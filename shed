@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+
+import depthai
+import av
+from fractions import Fraction
+import os
+
+if __name__ == "__main__":
+    pipeline = depthai.Pipeline()
+
+    FPS = 24
+    KEYFRAME_INTERVAL_SECONDS = 2
+    colorCam = pipeline.create(depthai.node.ColorCamera)
+    colorCam.setResolution(depthai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    colorCam.setColorOrder(depthai.ColorCameraProperties.ColorOrder.BGR)
+    colorCam.setFps(FPS)
+    colorCam.initialControl.setAutoFocusMode(depthai.CameraControl.AutoFocusMode.OFF)
+    colorCam.initialControl.setManualFocus(130)
+    colorCam.initialControl.setAutoWhiteBalanceMode(depthai.CameraControl.AutoWhiteBalanceMode.FLUORESCENT)
+    colorCam.initialControl.setSharpness(0)     # range: 0..4, default: 1
+    colorCam.initialControl.setLumaDenoise(0)   # range: 0..4, default: 1
+    colorCam.initialControl.setChromaDenoise(4) # range: 0..4, default: 1
+    
+    videnc = pipeline.create(depthai.node.VideoEncoder)
+    videnc.setDefaultProfilePreset(FPS, depthai.VideoEncoderProperties.Profile.H264_MAIN)
+    videnc.setBitrateKbps(500)
+    videnc.setKeyframeFrequency(FPS * KEYFRAME_INTERVAL_SECONDS)
+    colorCam.video.link(videnc.input)
+
+    veOut = pipeline.create(depthai.node.XLinkOut)
+    veOut.setStreamName("encoded")
+    videnc.bitstream.link(veOut.input)
+
+    device_infos = depthai.Device.getAllAvailableDevices()
+    if len(device_infos) == 0:
+        raise RuntimeError("No DepthAI device found!")
+    else:
+        print("Available devices:")
+        for i, info in enumerate(device_infos):
+            print(f"[{i}] {info.getMxId()} [{info.state.name}]")
+        if len(device_infos) == 1:
+            device_info = device_infos[0]
+        else:
+            val = input("Which DepthAI Device you want to use: ")
+            try:
+                device_info = device_infos[int(val)]
+            except:
+                raise ValueError("Incorrect value supplied: {}".format(val))
+
+    if device_info.protocol != depthai.XLinkProtocol.X_LINK_USB_VSC:
+        print("Running RTSP stream may be unstable due to connection... (protocol: {})".format(device_info.protocol))
+
+    print('Connecting to default device')
+    
+    with depthai.Device(pipeline, device_info) as device:
+        print('USB speed:',device.getUsbSpeed())
+        encoded = device.getOutputQueue("encoded", maxSize=480, blocking=True)
+        codec = av.CodecContext.create("h264", "r")
+        
+        def push_over_rtmp():
+            url = os.environ["CAMERA_UPLINK"]
+            
+            print('Connecting to RTMP server')
+            with av.open(url, 'w', format='flv') as rtmp_output:
+                output_stream = rtmp_output.add_stream('h264', rate=str(FPS))
+                output_stream.width = 1920
+                output_stream.height = 1080
+                output_stream.time_base = Fraction(1, 1000) # Microseconds
+                output_stream.pix_fmt = 'yuv420p'
+                print('Starting encoding stream')
+                start_ts = None
+                while True:
+                    frame = encoded.get()
+                    data = frame.getData()
+                    packets = codec.parse(data)
+                    # Set frame timestamp
+                    if start_ts is None:
+                        start_ts = frame.getTimestamp()
+                    for packet in packets:
+                        ts = int((frame.getTimestamp() - start_ts).total_seconds() * 1000)  # To microseconds
+                        packet.dts = ts + 1
+                        packet.pts = ts + 1
+                        packet.stream = output_stream
+                    rtmp_output.mux(packets) # Mux the Packet into container
+        
+        push_over_rtmp()

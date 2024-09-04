@@ -1,0 +1,18 @@
+[Unit]
+Description=Oak-D RTSP Recording
+After=network-online.target
+
+[Service]
+Type=simple
+UMask=007
+
+ExecStart=/usr/bin/oakd
+
+RuntimeMaxSec=3600
+Restart=always
+
+# Time to wait before forcefully stopped.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target
